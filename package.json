@@ -1,0 +1,15 @@
+{
+  "name": "pdf-leak-corpus",
+  "version": "1.0.0",
+  "description": "A test corpus for checking what PDF metadata removers actually remove.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "generate": "node generate.mjs",
+    "verify": "node verify.mjs",
+    "test": "node generate.mjs && node verify.mjs corpus"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1"
+  }
+}
