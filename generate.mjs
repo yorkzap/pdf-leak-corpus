@@ -104,6 +104,102 @@ const CASES = {
     return doc
   },
 
+  /*
+   * An attachment that never appears in the catalog's name tree.
+   *
+   * This is what Acrobat's "attach a file as a comment" produces: the file
+   * specification hangs off a /FileAttachment annotation's /FS. A cleaner that
+   * walks /Names -> /EmbeddedFiles and stops there hands the payload back
+   * intact, with the viewer's attachments pane showing nothing.
+   */
+  'attachment-via-annotation': async () => {
+    const doc = await PDFDocument.create()
+    applyDocumentMetadata(doc)
+    const page = doc.addPage([320, 320])
+    page.drawText('Attachment hangs off an annotation', { x: 40, y: 160, size: 11 })
+
+    const stream = doc.context.flateStream(Buffer.from(PLANTED.attachmentBody, 'utf8'))
+    const spec = doc.context.obj({
+      Type: PDFName.of('Filespec'),
+      F: PDFString.of(PLANTED.attachmentName),
+      UF: PDFString.of(PLANTED.attachmentName),
+      EF: doc.context.obj({ F: doc.context.register(stream) }),
+    })
+    const annot = doc.context.obj({
+      Type: PDFName.of('Annot'),
+      Subtype: PDFName.of('FileAttachment'),
+      Rect: doc.context.obj([12, 12, 36, 36]),
+      FS: doc.context.register(spec),
+    })
+    page.node.set(PDFName.of('Annots'), doc.context.obj([doc.context.register(annot)]))
+    return doc
+  },
+
+  /*
+   * The same script, written inline instead of as its own object.
+   *
+   * Most producers emit actions this way. A sweep that enumerates indirect
+   * objects looking for /S /JavaScript cannot see it: the action is a direct
+   * value inside the annotation, never an object in its own right.
+   */
+  'javascript-inline-action': async () => {
+    const doc = await PDFDocument.create()
+    applyDocumentMetadata(doc)
+    const page = doc.addPage([320, 320])
+    page.drawText('Script inline on a link', { x: 40, y: 160, size: 11 })
+    const annot = doc.context.obj({
+      Type: PDFName.of('Annot'),
+      Subtype: PDFName.of('Link'),
+      Rect: doc.context.obj([40, 150, 240, 175]),
+      A: doc.context.obj({ S: PDFName.of('JavaScript'), JS: PDFString.of(PLANTED.javascript) }),
+    })
+    page.node.set(PDFName.of('Annots'), doc.context.obj([doc.context.register(annot)]))
+    return doc
+  },
+
+  /*
+   * A dynamic XFA form.
+   *
+   * Its XML carries an XMP packet repeating the author from the Info
+   * dictionary, inside a compressed stream hanging off /AcroForm — where
+   * deleting document properties does not reach it and a text search of the
+   * file cannot see it.
+   *
+   * This case scores in both directions. The author must go; the template and
+   * the typed-in value must stay. See MUST_SURVIVE in lib/planted.mjs.
+   */
+  'xfa-form-xmp': async () => {
+    const doc = await PDFDocument.create()
+    applyDocumentMetadata(doc)
+    doc.addPage([320, 320]).drawText('Dynamic XFA form', { x: 40, y: 160, size: 11 })
+
+    const xml = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">',
+      '<template><subform name="form1"><field name="applicant"><ui><textEdit/></ui>',
+      `<desc>${PLANTED.xfaTemplate}</desc></field></subform></template>`,
+      '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>',
+      '<x:xmpmeta xmlns:x="adobe:ns:meta/">',
+      ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">',
+      '  <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">',
+      `   <dc:creator><rdf:Seq><rdf:li>${PLANTED.xfaAuthor}</rdf:li></rdf:Seq></dc:creator>`,
+      '  </rdf:Description>',
+      ' </rdf:RDF>',
+      '</x:xmpmeta>',
+      '<?xpacket end="w"?>',
+      '<xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/">',
+      `<xfa:data><form1><applicant>${PLANTED.xfaValue}</applicant></form1></xfa:data>`,
+      '</xfa:datasets>',
+      '</xdp:xdp>',
+    ].join('\n')
+
+    const stream = doc.context.flateStream(Buffer.from(xml, 'utf8'))
+    const acro = doc.context.obj({ Fields: doc.context.obj([]) })
+    acro.set(PDFName.of('XFA'), doc.context.register(stream))
+    doc.catalog.set(PDFName.of('AcroForm'), doc.context.register(acro))
+    return doc
+  },
+
   'javascript-openaction': async () => {
     const doc = await PDFDocument.create()
     applyDocumentMetadata(doc)

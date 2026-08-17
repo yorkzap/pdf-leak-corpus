@@ -25,9 +25,9 @@
  * Exits 1 if anything planted is still present.
  */
 
-import { PDFDocument, PDFName, PDFDict, PDFArray, PDFRawStream } from 'pdf-lib'
+import { PDFDocument, PDFName, PDFDict, PDFArray, PDFRawStream, decodePDFRawStream } from 'pdf-lib'
 import { readJpegMetadata } from './lib/jpeg.mjs'
-import { MARKERS, CONTENT_CLASS } from './lib/planted.mjs'
+import { MARKERS, MUST_SURVIVE, CONTENT_CLASS } from './lib/planted.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,6 +51,20 @@ function decodedText(doc) {
     for (const [, o] of doc.context.enumerateIndirectObjects()) {
       try {
         parts.push(o instanceof PDFRawStream ? o.dict.toString() : o.toString())
+        /*
+         * Stream payloads are usually image or font data and the JPEG probe
+         * covers those. XFA is the exception: it is XML, it is compressed, and
+         * the XMP packet inside it is exactly what this scan exists to find.
+         * Decode anything that comes back looking like text; ignore the rest.
+         */
+        if (o instanceof PDFRawStream) {
+          const raw = Buffer.from(decodePDFRawStream(o).decode())
+          const head = raw.subarray(0, 512)
+          const printable = head.filter(
+            (b) => b === 9 || b === 10 || b === 13 || (b >= 32 && b < 127),
+          ).length
+          if (head.length && printable / head.length > 0.9) parts.push(raw.toString('utf8'))
+        }
       } catch {
         /* an object that will not serialize contributes nothing */
       }
@@ -119,13 +133,46 @@ async function inspect(bytes) {
   } catch { /* leave defaults */ }
 
   try {
+    const looksLikeJs = (v) =>
+      v instanceof PDFDict &&
+      (String(v.get(PDFName.of('S'))) === '/JavaScript' || v.has(PDFName.of('JS')))
+
+    /*
+     * A script written inline is a direct value inside another object and never
+     * appears in the enumeration. Walking each object's own direct tree is the
+     * only way to see it without following references — and direct objects form
+     * a tree, so this cannot loop.
+     */
+    const countInline = (v, depth = 0) => {
+      if (depth > 12) return 0
+      let n = 0
+      if (v instanceof PDFDict) {
+        for (const [, child] of v.entries()) n += looksLikeJs(child) ? 1 : countInline(child, depth + 1)
+      } else if (v instanceof PDFArray) {
+        for (let i = 0; i < v.size(); i++) n += countInline(v.get(i), depth + 1)
+      }
+      return n
+    }
+
     for (const [, o] of ctx.enumerateIndirectObjects()) {
-      if (o instanceof PDFDict) {
-        if (String(o.get(PDFName.of('S'))) === '/JavaScript' || o.has(PDFName.of('JS'))) {
-          out.scriptObjects += 1
+      const dict = o instanceof PDFDict ? o : o?.dict
+      if (dict instanceof PDFDict) {
+        /*
+         * An embedded file is a /Filespec with an /EF wherever it is referenced
+         * from: the name tree, a /FileAttachment annotation's /FS, or an /AF
+         * associated-files array. Counting specifications catches all three;
+         * checking the name tree alone catches one.
+         */
+        if (String(dict.get(PDFName.of('Type'))) === '/Filespec' && dict.get(PDFName.of('EF'))) {
+          out.attachments = true
         }
+      }
+      if (o instanceof PDFDict) {
+        if (looksLikeJs(o)) out.scriptObjects += 1
+        else out.scriptObjects += countInline(o)
         continue
       }
+      if (dict instanceof PDFDict) out.scriptObjects += countInline(dict)
       if (!(o instanceof PDFRawStream)) continue
       if (String(o.dict.get(PDFName.of('Subtype'))) !== '/Image') continue
       out.images += 1
@@ -178,6 +225,10 @@ async function checkDir(dir) {
       x,
       hits,
       leaks: classify(x, hits),
+      // Content this file had to hand back untouched, and did not.
+      destroyed: MUST_SURVIVE.filter(
+        ([file, label]) => file === f && !hits.some((h) => h.label === label),
+      ).map(([, label]) => label),
       isControl: f.startsWith('control-'),
     })
   }
@@ -217,6 +268,13 @@ function render(sets) {
         }
       }
 
+      if (r.destroyed?.length) {
+        failures += 1
+        console.log(
+          `  ${' '.repeat(w)}${C.red('DESTROYED content that had to survive: ' + r.destroyed.join(', '))}`,
+        )
+      }
+
       const retained = r.hits.filter((h) => h.cls === CONTENT_CLASS).map((h) => h.label)
       if (retained.length) {
         console.log(`  ${' '.repeat(w)}${C.dim('retained by design (page content): ' + retained.join(', '))}`)
@@ -226,7 +284,11 @@ function render(sets) {
   }
 
   console.log()
-  console.log(failures ? C.red(`${failures} file(s) still carry planted data.`) : C.green('Nothing planted was found.'))
+  console.log(
+    failures
+      ? C.red(`${failures} file(s) leaked planted data or destroyed content.`)
+      : C.green('Nothing planted was found, and nothing that had to survive was lost.'),
+  )
   return failures
 }
 

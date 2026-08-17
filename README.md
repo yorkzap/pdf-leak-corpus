@@ -16,7 +16,7 @@ clean. This repository is a way to find out for certain.
 
 ## What it does
 
-`generate.mjs` writes seven PDFs with known values planted in known places: a
+`generate.mjs` writes ten PDFs with known values planted in known places: a
 photograph carrying camera make, model, a photographer name and GPS coordinates
 at a fixed latitude; a comment annotated with a reviewer's name and timestamp;
 an embedded spreadsheet; a script set to run on open; and ordinary document
@@ -47,7 +47,8 @@ Exit code is 1 if anything planted is still present, so this works as a
 regression test if you are building one of these tools.
 
 Testing one file is enough for a quick answer — use `everything.pdf`, which
-contains all five leak classes at once.
+contains all five leak classes at once. It does not contain the three awkward
+cases below, though, and those are where tools usually break.
 
 ## The files
 
@@ -58,8 +59,29 @@ contains all five leak classes at once.
 | `annotation-authorship.pdf` | A review comment with an author name and timestamp |
 | `embedded-attachment.pdf` | An attached CSV |
 | `javascript-openaction.pdf` | A script set to run when the document opens |
-| `everything.pdf` | All of the above in one file |
+| `attachment-via-annotation.pdf` | An attached CSV hanging off a comment, not the name tree |
+| `javascript-inline-action.pdf` | A script written inline on a link, not as its own object |
+| `xfa-form-xmp.pdf` | A dynamic XFA form whose XML carries an XMP packet |
+| `everything.pdf` | The first five in one file |
 | `control-flate-wrapped-jpeg.pdf` | A JPEG wrapped in a second compression layer |
+
+The three middle cases exist because each one defeats the obvious
+implementation:
+
+- **`attachment-via-annotation.pdf`** — an attachment reached through a
+  `/FileAttachment` annotation's `/FS` rather than the catalog's
+  `/Names -> /EmbeddedFiles` tree. This is what Acrobat's "attach a file as a
+  comment" produces. A cleaner that walks the name tree and stops there returns
+  the payload intact, with the viewer's attachments pane showing nothing.
+- **`javascript-inline-action.pdf`** — the same script as
+  `javascript-openaction.pdf`, written as a direct value inside the annotation
+  instead of as its own indirect object. Most producers emit actions this way,
+  and a sweep that enumerates objects looking for `/S /JavaScript` cannot see
+  it.
+- **`xfa-form-xmp.pdf`** — scores in *both* directions. The XMP author must be
+  removed; the form template and the typed-in value must survive. A tool that
+  deletes the whole XFA packet gets a perfect row on leaks while destroying the
+  document, which is why `verify.mjs` also checks that content is still there.
 
 The control is the interesting one. Its image bytes are not a JPEG on disk, so a
 tool cannot strip the EXIF without decompressing and re-compressing — which
@@ -74,10 +96,16 @@ Three passes, because each one alone has a blind spot:
   Misses anything unlinked but not deleted.
 - **Raw bytes** — search the file for the planted strings. Misses anything inside
   a Flate-compressed object stream.
-- **Decoded** — serialize every parsed indirect object, orphans included, and
-  search that. This is the pass that catches objects nothing points at, which are
-  invisible to the byte scan when compressed and invisible to `qpdf --qdf`
-  because qpdf collects them before you can look.
+- **Decoded** — serialize every parsed indirect object, orphans included, walk
+  each one's direct values for inline actions, and decompress any stream that
+  comes back looking like text. This is the pass that catches objects nothing
+  points at, which are invisible to the byte scan when compressed and invisible
+  to `qpdf --qdf` because qpdf collects them before you can look. It is also
+  what finds an XMP packet buried inside a compressed XFA stream.
+
+A fourth check runs in the opposite direction: some planted strings are things
+that must still be *present*. A cleaner that empties an XFA form leaks nothing
+and has destroyed the document, and no amount of leak-counting will notice.
 
 Annotation comment text is reported separately as *retained by design*. It is
 page content, visible in any viewer that renders comments, and a tool that leaves
@@ -88,6 +116,12 @@ document usually has not thought about the review notes travelling with it.
 
 Each tool was given `everything.pdf` through its normal web interface and the
 returned file inspected.
+
+`attachment-via-annotation.pdf`, `javascript-inline-action.pdf` and
+`xfa-form-xmp.pdf` were added after this measurement and **the third-party tools
+in the table below have not been re-run against them.** The table says nothing
+about how they handle those three, and it would be unfair to imply otherwise.
+Only Lyonite has been measured against the full ten.
 
 | Tool | Doc properties | Image GPS | Annotation author | Attachment | JavaScript |
 |---|---|---|---|---|---|
