@@ -10,7 +10,7 @@
  */
 
 import { PDFDocument, PDFName, PDFString, PDFHexString, PDFArray } from 'pdf-lib'
-import { PLANTED, buildExifApp1, buildComSegment } from './lib/planted.mjs'
+import { PLANTED, buildExifApp1, buildComSegment, assertMarkersDistinct } from './lib/planted.mjs'
 import { readJpegMetadata } from './lib/jpeg.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -251,6 +251,13 @@ const CASES = {
 }
 
 async function main() {
+  const collisions = assertMarkersDistinct()
+  if (collisions.length) {
+    console.error('Planted values collide, so leak classes cannot be told apart:')
+    for (const c of collisions) console.error(`  ${c}`)
+    process.exit(2)
+  }
+
   if (!fs.existsSync(FIXTURE)) {
     console.error(`Missing fixtures/photo.jpg — see README.`)
     process.exit(2)
